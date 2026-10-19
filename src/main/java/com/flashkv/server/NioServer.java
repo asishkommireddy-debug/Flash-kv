@@ -18,7 +18,7 @@ public class NioServer {
 
     public NioServer(int port) {
         this.port = port;
-        this.store = new MemoryStore();
+        this.store = new MemoryStore(3);
     }
 
     public void start() throws IOException {
