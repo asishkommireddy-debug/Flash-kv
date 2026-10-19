@@ -1,7 +1,7 @@
 package com.flashkv.server;
 
+import com.flashkv.persistence.WriteAheadLog;
 import com.flashkv.storage.MemoryStore;
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -12,16 +12,21 @@ import java.util.Set;
 public class NioServer {
     private final int port;
     private final MemoryStore store;
+    private final WriteAheadLog wal;
     private ServerSocketChannel serverChannel;
     private Selector selector;
     private boolean isRunning;
 
     public NioServer(int port) {
         this.port = port;
-        this.store = new MemoryStore(3);
+        this.store = new MemoryStore(10000); // 10,000 keys capacity
+        this.wal = new WriteAheadLog("flashkv.wal"); // Persistent WAL file
     }
 
     public void start() throws IOException {
+        // RECOVERY: Replay all disk transactions into RAM before opening port 6379!
+        this.wal.recover(this.store);
+
         this.selector = Selector.open();
         this.serverChannel = ServerSocketChannel.open();
         this.serverChannel.configureBlocking(false);
@@ -92,79 +97,81 @@ public class NioServer {
 
             String message = new String(data).trim();
             System.out.println("📨 Received from client: [" + message + "]");
-             
+
             String[] parts = message.split("\\s+");
-String command = parts[0].toUpperCase();
-String response;
+            String command = parts[0].toUpperCase();
+            String response;
 
-switch (command) {
-    case "PING":
-        response = "+PONG\r\n";
-        break;
+            switch (command) {
+                case "PING":
+                    response = "+PONG\r\n";
+                    break;
 
-    case "SET":
-        if (parts.length < 3) {
-            response = "-ERR wrong number of arguments for 'SET'\r\n";
-        } else {
-            this.store.set(parts[1], parts[2]);
-            response = "+OK\r\n";
-        }
-        break;
+                case "SET":
+                    if (parts.length < 3) {
+                        response = "-ERR wrong number of arguments for 'SET'\r\n";
+                    } else {
+                        this.store.set(parts[1], parts[2]);
+                        this.wal.append("SET " + parts[1] + " " + parts[2]); // Append write to disk
+                        response = "+OK\r\n";
+                    }
+                    break;
 
-    case "GET":
-        if (parts.length < 2) {
-            response = "-ERR wrong number of arguments for 'GET'\r\n";
-        } else {
-            String val = this.store.get(parts[1]);
-            if (val == null) {
-                response = "$-1\r\n"; // Nil / Not found in Redis protocol
-            } else {
-                response = "+" + val + "\r\n";
+                case "GET":
+                    if (parts.length < 2) {
+                        response = "-ERR wrong number of arguments for 'GET'\r\n";
+                    } else {
+                        String val = this.store.get(parts[1]);
+                        if (val == null) {
+                            response = "$-1\r\n";
+                        } else {
+                            response = "+" + val + "\r\n";
+                        }
+                    }
+                    break;
+
+                case "DEL":
+                    if (parts.length < 2) {
+                        response = "-ERR wrong number of arguments for 'DEL'\r\n";
+                    } else {
+                        boolean deleted = this.store.delete(parts[1]);
+                        if (deleted) {
+                            this.wal.append("DEL " + parts[1]); // Append delete to disk
+                        }
+                        response = ":" + (deleted ? 1 : 0) + "\r\n";
+                    }
+                    break;
+
+                case "EXPIRE":
+                    if (parts.length < 3) {
+                        response = "-ERR wrong number of arguments for 'EXPIRE'\r\n";
+                    } else {
+                        try {
+                            long seconds = Long.parseLong(parts[2]);
+                            boolean set = this.store.expire(parts[1], seconds);
+                            response = ":" + (set ? 1 : 0) + "\r\n";
+                        } catch (NumberFormatException e) {
+                            response = "-ERR value is not an integer or out of range\r\n";
+                        }
+                    }
+                    break;
+
+                case "TTL":
+                    if (parts.length < 2) {
+                        response = "-ERR wrong number of arguments for 'TTL'\r\n";
+                    } else {
+                        long remaining = this.store.ttl(parts[1]);
+                        response = ":" + remaining + "\r\n";
+                    }
+                    break;
+
+                default:
+                    response = "-ERR unknown command '" + command + "'\r\n";
+                    break;
             }
-        }
-        break;
 
-    case "DEL":
-        if (parts.length < 2) {
-            response = "-ERR wrong number of arguments for 'DEL'\r\n";
-        } else {
-            boolean deleted = this.store.delete(parts[1]);
-            response = ":" + (deleted ? 1 : 0) + "\r\n";
-        }
-        break;
+            clientChannel.write(ByteBuffer.wrap(response.getBytes()));
 
-    case "EXPIRE":
-        if (parts.length < 3) {
-            response = "-ERR wrong number of arguments for 'EXPIRE'\r\n";
-        } else {
-            try {
-                long seconds = Long.parseLong(parts[2]);
-                boolean set = this.store.expire(parts[1], seconds);
-                response = ":" + (set ? 1 : 0) + "\r\n";
-            } catch (NumberFormatException e) {
-                response = "-ERR value is not an integer or out of range\r\n";
-            }
-        }
-        break;
-
-    case "TTL":
-        if (parts.length < 2) {
-            response = "-ERR wrong number of arguments for 'TTL'\r\n";
-        } else {
-            long remaining = this.store.ttl(parts[1]);
-            response = ":" + remaining + "\r\n";
-        }
-        break;
-
-    default:
-        response = "-ERR unknown command '" + command + "'\r\n";
-        break;
-}
-
-clientChannel.write(ByteBuffer.wrap(response.getBytes()));
-
-
-        
         } catch (IOException e) {
             System.err.println("Connection reset by client.");
             try {
@@ -176,6 +183,7 @@ clientChannel.write(ByteBuffer.wrap(response.getBytes()));
 
     public void stop() {
         this.isRunning = false;
+        if (this.wal != null) this.wal.close();
         try {
             if (this.serverChannel != null) this.serverChannel.close();
             if (this.selector != null) this.selector.close();

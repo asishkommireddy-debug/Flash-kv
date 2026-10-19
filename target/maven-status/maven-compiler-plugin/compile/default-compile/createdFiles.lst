@@ -1,3 +1,4 @@
+com/flashkv/persistence/WriteAheadLog.class
 com/flashkv/server/NioServer.class
 com/flashkv/storage/MemoryStore.class
 com/flashkv/FlashKVServer.class
