@@ -1,6 +1,7 @@
 com/flashkv/persistence/WriteAheadLog.class
-com/flashkv/server/NioServer.class
-com/flashkv/storage/MemoryStore.class
 com/flashkv/FlashKVServer.class
-com/flashkv/storage/LruCache$Node.class
 com/flashkv/storage/LruCache.class
+com/flashkv/server/NioServer.class
+com/flashkv/benchmark/BenchmarkClient.class
+com/flashkv/storage/MemoryStore.class
+com/flashkv/storage/LruCache$Node.class
